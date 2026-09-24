@@ -187,14 +187,28 @@ else
   echo "  ✓ ثُبِّت"
 fi
 
-# جدار الحماية: إن كان ufw مفعَّلًا يُفتح المنفذان للمنصة، ويُبقى SSH
-# مفتوحًا — وإلا انقطع الاتصال بالخادم نفسه.
-if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-  ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null
-  ufw allow 80/tcp >/dev/null
-  ufw allow 443/tcp >/dev/null
-  echo "  ✓ فُتح المنفذان 80 و443 في جدار الحماية"
-fi
+# ---- جدار الحماية ----
+# يُفعَّل من أول يوم عند أي مزوّد — لا يُفترض أن للمزوّد جدارًا في لوحته.
+# ثلاثة منافذ فقط: SSH للدخول، و 80 و 443 للمنصة.
+#
+# SSH يُسمح به **قبل** التفعيل، ومنفذه يُقرأ من إعداد sshd لا يُفترض 22:
+# لو فُعِّل الجدار ومنفذ SSH مغلق لانقطع الاتصال بالخادم نفسه.
+#
+# تنبيه: Docker يفتح منافذه المنشورة متجاوزًا ufw. هنا لا أثر لذلك —
+# المنصة لا تنشر إلا 80 و 443، والقاعدة وغيرها على شبكة Docker الداخلية.
+# لكن جدار المزوّد (Cloud Firewall) يصفّي قبل الخادم فلا يتجاوزه شيء،
+# فيُنصح به فوق هذا حيث يتوفّر.
+step "جدار الحماية"
+command -v ufw >/dev/null || apt-get install -y -qq ufw >/dev/null
+SSH_PORTS=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | sort -u)
+[ -n "$SSH_PORTS" ] || SSH_PORTS=22
+for p in $SSH_PORTS; do ufw allow "$p/tcp" >/dev/null; done
+ufw allow 80/tcp >/dev/null
+ufw allow 443/tcp >/dev/null
+ufw default deny incoming >/dev/null
+ufw default allow outgoing >/dev/null
+ufw --force enable >/dev/null
+echo "  ✓ مفعَّل: SSH ($(echo $SSH_PORTS | tr ' ' ',')) و 80 و 443 فقط"
 
 # ---- 7) التنصيب ----
 exec ./scripts/install.sh "$DOMAIN" "$EMAIL"

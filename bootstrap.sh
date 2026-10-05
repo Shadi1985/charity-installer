@@ -36,7 +36,12 @@ set -euo pipefail
 # ---- ما يتغيّر إن نُقل المستودع ----
 REPO_PATH="Shadi1985/projectsPanel"
 INSTALL_DIR="${INSTALL_DIR:-/opt/charity}"
-KEY="$HOME/.ssh/charity_deploy"
+# مجلد root ثابت لا $HOME: مع `sudo -E` أو إعداد sudo يُبقي HOME يصير
+# $HOME مجلد المستخدم العادي، فتُكتب فيه ملفات يملكها root وتنكسر
+# مفاتيحه. و ssh نفسه لا يقرأ $HOME بل مجلد المستخدم من النظام — فالمفتاح
+# هناك لن يجده أصلًا. السكربت يعمل بـ root، وcron الوكيل كذلك.
+SSH_DIR=/root/.ssh
+KEY="$SSH_DIR/charity_deploy"
 # اسم مستعار لـ GitHub خاص بالمنصة: لا يمسّ أي اتصال آخر بـ GitHub على
 # الخادم، ولا يتعارض مع مفاتيح أخرى إن وُجدت.
 HOST_ALIAS="charity-github"
@@ -44,7 +49,12 @@ HOST_ALIAS="charity-github"
 # بصمة GitHub الرسمية (ed25519). مثبّتة هنا لا مقبولة عند أول اتصال:
 # لا أحد على الخادم ليتحقق منها، والقبول الأعمى يسهّل التجسس على
 # الاتصال. البصمة: SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU
-GITHUB_HOSTKEY="github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+#
+# ⚠ GitHub دوّر مفتاح RSA في 2023. إن دوّر هذا أيضًا فشل التحقق، فيتوقف
+# السكربت ويطلب القيمة الجديدة — من https://api.github.com/meta (ssh_keys)
+# — تُمرَّر دون انتظار تحديث هذا الملف:
+#     curl … | sudo GITHUB_HOSTKEY="github.com ssh-ed25519 …" bash
+GITHUB_HOSTKEY="${GITHUB_HOSTKEY:-github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl}"
 
 NO_INSTALL=0
 for arg in "$@"; do
@@ -90,6 +100,28 @@ DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%%/*}"
 [ -n "$EMAIL" ] || EMAIL=$(ask "  بريد الإدارة (لشهادة HTTPS): ")
 [[ "$EMAIL" == *@* ]] || die "بريد غير صالح."
 
+# ---- هل يشير النطاق إلى هذا الخادم؟ ----
+# خطأ هنا لا يظهر إلا في آخر التنصيب، حين تفشل شهادة HTTPS بعد دقائق
+# من البناء. تحذير لا إيقاف: النطاق خلف Cloudflare (السحابة البرتقالية)
+# يشير إلى عناوينها لا إلى الخادم، ويعمل مع ذلك.
+if [ "$DOMAIN" != localhost ]; then
+  MY_IP=$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
+  # «|| true» داخل الأنبوب: نطاق بلا سجل يُفشل getent، ومع pipefail و
+  # set -e يخرج السكربت كله قبل أن يحذّر — وقع هذا في التجربة.
+  DNS_IPS=$({ getent ahostsv4 "$DOMAIN" 2>/dev/null || true; } | awk '{print $1}' | sort -u | tr '\n' ' ')
+  if [ -z "$DNS_IPS" ]; then
+    echo
+    echo "  ⚠ النطاق $DOMAIN لا يشير إلى أي عنوان بعد."
+    echo "    أضف سجل A إلى عنوان هذا الخادم ${MY_IP:+($MY_IP)} قبل أن يصل التنصيب إلى شهادة HTTPS."
+  elif [ -n "$MY_IP" ] && [[ " $DNS_IPS" != *" $MY_IP "* ]]; then
+    echo
+    echo "  ⚠ النطاق $DOMAIN يشير إلى $DNS_IPS — وعنوان هذا الخادم $MY_IP."
+    echo "    إن لم يكن خلف Cloudflare فصحّح سجل A، وإلا فشلت شهادة HTTPS في آخر التنصيب."
+  else
+    echo "  ✓ النطاق يشير إلى هذا الخادم"
+  fi
+fi
+
 # ---- 2) الأدوات الأساسية ----
 step "الأدوات الأساسية"
 export DEBIAN_FRONTEND=noninteractive
@@ -101,8 +133,8 @@ echo "  ✓ git و curl و openssl و cron"
 
 # ---- 3) المفتاح ----
 step "مفتاح الوصول"
-mkdir -p "$HOME/.ssh"
-chmod 700 "$HOME/.ssh"
+mkdir -p "$SSH_DIR"
+chmod 700 "$SSH_DIR"
 if [ -f "$KEY" ]; then
   echo "  يُستعمل المفتاح الموجود على هذا الخادم."
 else
@@ -110,8 +142,8 @@ else
   echo "  ✓ وُلِّد مفتاح جديد على هذا الخادم"
 fi
 
-if ! grep -q "^Host $HOST_ALIAS\$" "$HOME/.ssh/config" 2>/dev/null; then
-  cat >> "$HOME/.ssh/config" <<EOF
+if ! grep -q "^Host $HOST_ALIAS\$" "$SSH_DIR/config" 2>/dev/null; then
+  cat >> "$SSH_DIR/config" <<EOF
 
 # منصة إدارة المشاريع الخيرية — مفتاح نشر للقراءة فقط
 Host $HOST_ALIAS
@@ -120,10 +152,10 @@ Host $HOST_ALIAS
   IdentityFile $KEY
   IdentitiesOnly yes
 EOF
-  chmod 600 "$HOME/.ssh/config"
+  chmod 600 "$SSH_DIR/config"
 fi
-grep -qF "$GITHUB_HOSTKEY" "$HOME/.ssh/known_hosts" 2>/dev/null \
-  || echo "$GITHUB_HOSTKEY" >> "$HOME/.ssh/known_hosts"
+grep -qF "$GITHUB_HOSTKEY" "$SSH_DIR/known_hosts" 2>/dev/null \
+  || echo "$GITHUB_HOSTKEY" >> "$SSH_DIR/known_hosts"
 
 has_access() {
   # GitHub يرد برسالة ترحيب ويخرج بـ 1 حتى حين ينجح التحقق (لا shell).
@@ -131,6 +163,12 @@ has_access() {
   # السكربت إلى الأبد والمفتاح مفعَّل. تُقرأ الرسالة وحدها.
   local out
   out=$(ssh -n -o BatchMode=yes -o ConnectTimeout=10 -T "git@$HOST_ALIAS" 2>&1 || true)
+  # بصمة GitHub تغيّرت: الانتظار لا يُصلحها، فيتوقف السكربت ويقول لماذا.
+  if [[ "$out" == *"REMOTE HOST IDENTIFICATION HAS CHANGED"* || "$out" == *"Host key verification failed"* ]]; then
+    die "بصمة GitHub لا تطابق المثبّتة في السكربت — ربما دوّرت GitHub مفتاحها.
+  تحقق من القيمة الجديدة في https://api.github.com/meta ثم أعد التشغيل هكذا:
+      curl … | sudo GITHUB_HOSTKEY=\"github.com ssh-ed25519 …\" bash"
+  fi
   [[ "$out" == *"successfully authenticated"* ]]
 }
 

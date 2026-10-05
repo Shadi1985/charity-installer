@@ -102,7 +102,19 @@ ORG=$(printf '%s' "$ORG" | tr -d '\r\n' | tr -s ' ' '-')
 DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%%/*}"
 [ -n "$DOMAIN" ] || die "النطاق مطلوب."
 [ -n "$EMAIL" ] || EMAIL=$(ask "  بريد الإدارة (لشهادة HTTPS): ")
-[[ "$EMAIL" == *@* ]] || die "بريد غير صالح."
+# ما يُكتب في طرفية المتصفح قد يحمل حرفًا خفيًا: تبديل لغة لوحة المفاتيح
+# ترك في التجربة نصف حرف عربي (البايت 0xD9) أول البريد، فقبله الفحص ورفضته
+# جهات الشهادات. النطاق والبريد لاتينيان، فيُحذف ما سوى حروفهما.
+DOMAIN=$(printf '%s' "$DOMAIN" | LC_ALL=C tr -cd 'A-Za-z0-9.-')
+EMAIL=$(printf '%s' "$EMAIL" | LC_ALL=C tr -cd 'A-Za-z0-9.@_+-')
+[[ "$EMAIL" =~ ^[^@]+@[^@]+.[A-Za-z]{2,}$ ]] || die "بريد غير صالح: $EMAIL"
+# جهات الشهادات ترفض البريد بنطاق وهمي (test.com وexample.org…)، فلا تصدر
+# شهادة HTTPS ولا يفتح الرابط — والخطأ لا يظهر إلا في سجل Caddy بعد التنصيب.
+# وقع هذا في التجربة. يُرفض هنا بدل أن يُكتشف هناك. (localhost لا يطلب شهادة عامة.)
+[ "$DOMAIN" = localhost ] || case "${EMAIL##*@}" in
+  example.com|example.org|example.net|test.com|test|localhost|invalid|*.example|*.test|*.invalid|*.localhost)
+    die "البريد $EMAIL بنطاق وهمي — جهات شهادات HTTPS ترفضه فلا يفتح الرابط. استعمل بريدًا حقيقيًا." ;;
+esac
 if [ "$LICENSE" = __ask__ ]; then
   LICENSE=$(ask "  رقم الترخيص من مطوّر المنصة (Enter إن لم يكن لديك): ")
 fi

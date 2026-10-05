@@ -149,7 +149,6 @@ if [ -n "$LICENSE" ]; then
   # واختبار يتحقق أن النسختين متطابقتان).
   step "الترخيص"
   install -d -m 700 /etc/charity
-  ( umask 077; printf '%s\n' "$LICENSE" > /etc/charity/license )
   cat > /usr/local/bin/git-credential-charity <<'CHARITY_HELPER'
 #!/usr/bin/env bash
 # =====================================================================
@@ -180,8 +179,10 @@ done
 [ "$HOST" = github.com ] || exit 0
 
 CONF=/etc/charity
-[ -r "$CONF/license" ] || exit 0
-LICENSE="$(tr -d ' \r\n' < "$CONF/license")"
+# ملف بديل يُجرَّب به ترخيص جديد قبل أن يحلّ محل القائم.
+LICENSE_FILE="${CHARITY_LICENSE_FILE:-$CONF/license}"
+[ -r "$LICENSE_FILE" ] || exit 0
+LICENSE="$(tr -d ' \r\n' < "$LICENSE_FILE")"
 GATEWAY="$(tr -d ' \r\n' 2>/dev/null < "$CONF/gateway" || true)"
 GATEWAY="${GATEWAY:-https://updates.irtiqa.academy}"
 
@@ -218,7 +219,7 @@ fi
 
 case "$CODE" in
   200) cat "$BODY" ;;
-  401) echo "✗ بوابة التحديثات: الترخيص غير معروف ($CONF/license)." >&2 ;;
+  401) echo "✗ بوابة التحديثات: الترخيص غير معروف ($LICENSE_FILE)." >&2 ;;
   403) echo "✗ بوابة التحديثات: تحديثات هذه المؤسسة موقوفة — تواصل مع مطوّر المنصة. المنصة تبقى تعمل." >&2 ;;
   429) echo "✗ بوابة التحديثات: طلبات كثيرة — أعد المحاولة بعد دقيقة." >&2 ;;
   *)   echo "✗ بوابة التحديثات غير متاحة الآن ($CODE). المنصة تبقى تعمل، والتحديث يُعاد لاحقًا." >&2 ;;
@@ -227,10 +228,17 @@ exit 0
 CHARITY_HELPER
   chmod 755 /usr/local/bin/git-credential-charity
   REPO_URL="https://github.com/$REPO_PATH.git"
-  if ! GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c credential.helper=charity \
-       ls-remote --tags "$REPO_URL" >/dev/null; then
-    die "تعذّر الوصول بالترخيص — الرسالة أعلاه تقول السبب. تحقق من الرقم، أو راسل مطوّر المنصة."
+  # يُجرَّب من ملف مؤقت قبل أن يحلّ محل ترخيص قائم: رقم خاطئ في إعادة
+  # تشغيل لا يجوز أن يكسر خادمًا يعمل.
+  NEW_LIC="$(mktemp /etc/charity/.license.XXXXXX)"
+  printf '%s\n' "$LICENSE" > "$NEW_LIC"
+  if ! CHARITY_LICENSE_FILE="$NEW_LIC" GIT_TERMINAL_PROMPT=0 \
+       git -c credential.helper= -c credential.helper=charity ls-remote --tags "$REPO_URL" >/dev/null; then
+    rm -f "$NEW_LIC"
+    die "تعذّر الوصول بالترخيص — الرسالة أعلاه تقول السبب، ولم يتغيّر شيء. تحقق من الرقم، أو راسل مطوّر المنصة."
   fi
+  chmod 600 "$NEW_LIC"
+  mv -f "$NEW_LIC" /etc/charity/license
   echo "  ✓ الترخيص مفعَّل"
 else
 REPO_URL="git@$HOST_ALIAS:$REPO_PATH.git"

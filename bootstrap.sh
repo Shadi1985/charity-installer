@@ -10,10 +10,14 @@
 #      curl -fsSL https://raw.githubusercontent.com/Shadi1985/charity-installer/main/bootstrap.sh | sudo bash
 #
 #  ثم يتولّى الباقي:
-#   1. يسأل عن اسم المؤسسة والنطاق والبريد — ثم لا يسأل شيئًا بعدها
-#   2. يولّد مفتاح نشر على هذا الخادم، ويعرض جزءه العام
-#   3. ينتظر حتى يضيفه المطوّر في GitHub، ويختبر الوصول كل 10 ثوانٍ
-#   4. يستنسخ المنصة، ويثبّت Docker إن غاب، ويشغّل install.sh
+#   1. يسأل عن اسم المؤسسة والنطاق والبريد والترخيص — ثم لا يسأل شيئًا
+#   2. بالترخيص (من مطوّر المنصة): يصل إلى المستودع فورًا عبر بوابة
+#      التحديثات، بلا مفتاح ولا انتظار
+#      بلا ترخيص: يولّد مفتاح نشر، وينتظر حتى يضيفه المطوّر في GitHub
+#   3. يستنسخ المنصة، ويثبّت Docker إن غاب، ويشغّل install.sh
+#
+#  الترخيص يُمرَّر أيضًا دون سؤال:
+#      curl … | sudo LICENSE=chl_… bash
 #
 #  المفتاح الخاص يُولَّد هنا ولا يغادر الخادم. ما يُرسَل إلى المطوّر
 #  هو الجزء العام وحده — ليس سرًّا، ومن يملكه لا يستطيع به شيئًا.
@@ -89,7 +93,7 @@ command -v apt-get >/dev/null || die "هذا السكربت لـ Ubuntu/Debian. 
 step "بيانات المؤسسة"
 # تُمرَّر مسبقًا إن شاء من يشغّله: ORG=… DOMAIN=… EMAIL=… — لمزوّدي
 # الاستضافة الذين يشغّلون سكربتًا عند إنشاء الخادم، وللاختبار.
-ORG="${ORG:-}"; DOMAIN="${DOMAIN:-}"; EMAIL="${EMAIL:-}"
+ORG="${ORG:-}"; DOMAIN="${DOMAIN:-}"; EMAIL="${EMAIL:-}"; LICENSE="${LICENSE-__ask__}"
 [ -n "$ORG" ] || ORG=$(ask "  اسم المؤسسة (لتسمية المفتاح، مثل: الأمل-والعمل): ")
 # تسمية للمفتاح لا أكثر: المسافات تصير شرطات، ولا أسطر.
 ORG=$(printf '%s' "$ORG" | tr -d '\r\n' | tr -s ' ' '-')
@@ -99,6 +103,12 @@ DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%%/*}"
 [ -n "$DOMAIN" ] || die "النطاق مطلوب."
 [ -n "$EMAIL" ] || EMAIL=$(ask "  بريد الإدارة (لشهادة HTTPS): ")
 [[ "$EMAIL" == *@* ]] || die "بريد غير صالح."
+if [ "$LICENSE" = __ask__ ]; then
+  LICENSE=$(ask "  رقم الترخيص من مطوّر المنصة (Enter إن لم يكن لديك): ")
+fi
+LICENSE=$(printf '%s' "$LICENSE" | tr -d ' \r\n')
+[ -z "$LICENSE" ] || [[ "$LICENSE" =~ ^chl_[A-Za-z0-9]{32}$ ]] \
+  || die "رقم الترخيص غير صالح — يبدأ بـ chl_ ويليه 32 حرفًا. انسخه كما أُرسل إليك."
 
 # ---- هل يشير النطاق إلى هذا الخادم؟ ----
 # خطأ هنا لا يظهر إلا في آخر التنصيب، حين تفشل شهادة HTTPS بعد دقائق
@@ -131,7 +141,99 @@ apt-get install -y -qq git curl openssl ca-certificates cron >/dev/null
 systemctl enable --now cron >/dev/null 2>&1 || service cron start >/dev/null 2>&1 || true
 echo "  ✓ git و curl و openssl و cron"
 
-# ---- 3) المفتاح ----
+# ---- 3) الوصول إلى المستودع ----
+if [ -n "$LICENSE" ]; then
+  # بالترخيص: لا مفتاح على الخادم. مساعد git يأخذ من بوابة التحديثات
+  # رمزًا صلاحيته ساعة عند كل جلب. يُكتب هنا قبل الاستنساخ، والمستودع
+  # لم يصل بعد — لذلك نسخته مضمَّنة (الأصل: scripts/git-credential-charity،
+  # واختبار يتحقق أن النسختين متطابقتان).
+  step "الترخيص"
+  install -d -m 700 /etc/charity
+  ( umask 077; printf '%s\n' "$LICENSE" > /etc/charity/license )
+  cat > /usr/local/bin/git-credential-charity <<'CHARITY_HELPER'
+#!/usr/bin/env bash
+# =====================================================================
+#  مساعد git — رمز قصير من بوابة التحديثات بدل مفتاح ثابت
+# =====================================================================
+#  git يستدعيه عند كل جلب من GitHub:  git-credential-charity get
+#  فيرسل ترخيص المؤسسة وإصدارها إلى البوابة، ويعيد رمزًا صلاحيته ساعة
+#  لقراءة مستودع المنصة وحده.
+#
+#  يعيش خارج المستودع (/usr/local/bin) لا في scripts/: الرجوع إلى
+#  إصدار أقدم يغيّر ما في الشجرة، ولا يجوز أن يكسر ذلك الجلب نفسه.
+#  والترخيص في /etc/charity/license (root، صلاحية 600).
+#
+#  ⚠ نسخة منه مضمَّنة في scripts/bootstrap.sh (يكتبها قبل الاستنساخ،
+#  والمستودع لم يصل بعد). اختبار يتحقق أن النسختين متطابقتان.
+# =====================================================================
+set -u
+
+ACTION="${1:-}"
+HOST=""
+# git يرسل الطلب أسطرًا ثم سطرًا فارغًا، ويجب أن يُقرأ كله قبل الرد.
+while IFS= read -r line && [ -n "$line" ]; do
+  case "$line" in host=*) HOST="${line#host=}" ;; esac
+done
+
+# «store» و«erase»: لا شيء يُحفظ، فلا شيء يُمحى.
+[ "$ACTION" = get ] || exit 0
+[ "$HOST" = github.com ] || exit 0
+
+CONF=/etc/charity
+[ -r "$CONF/license" ] || exit 0
+LICENSE="$(tr -d ' \r\n' < "$CONF/license")"
+GATEWAY="$(tr -d ' \r\n' 2>/dev/null < "$CONF/gateway" || true)"
+GATEWAY="${GATEWAY:-https://updates.irtiqa.academy}"
+
+# الإصدار العامل الآن يُرسَل مع الطلب: هكذا يعرف المطوّر من على أي إصدار.
+VERSION="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || true)"
+TOP="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+
+BODY="$(mktemp)"; HDR="$(mktemp)"
+trap 'rm -f "$BODY" "$HDR"' EXIT
+
+# الترخيص في ملف إعداد يُقرأ من المدخل لا في سطر الأوامر: سطر الأوامر
+# يقرؤه كل مستخدم على الخادم بـ ps.
+CODE="$(printf 'header = "Authorization: Bearer %s"\n' "$LICENSE" \
+  | curl -sS --max-time 20 -K - -o "$BODY" -D "$HDR" -w '%{http_code}' \
+      -X POST --data-urlencode "version=$VERSION" "$GATEWAY/v1/credential" 2>/dev/null || echo 000)"
+
+if [ -n "$TOP" ] && [ -d "$TOP/updates" ]; then
+  # آخر رد من البوابة: صفحة التحديثات تقول منه «موقوفة» أو «الترخيص
+  # غير معروف» بدل «الوكيل متوقف».
+  printf '{ "code": %s, "at": "%s" }\n' "$((10#$CODE))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    > "$TOP/updates/gateway.json"
+  chmod 0644 "$TOP/updates/gateway.json" 2>/dev/null || true
+
+  # حدّ الإصدار (إن ثبّت المطوّر المؤسسة على إصدار): يقرؤه الوكيل و update.sh.
+  if [ "$CODE" = 200 ]; then
+    MAX="$(grep -i '^x-max-version:' "$HDR" | head -1 | cut -d: -f2- | tr -d ' \r\n' || true)"
+    if [ -n "$MAX" ]; then
+      printf 'MAX_VERSION=%s\n' "$MAX" > "$TOP/updates/.policy"
+    else
+      rm -f "$TOP/updates/.policy"
+    fi
+  fi
+fi
+
+case "$CODE" in
+  200) cat "$BODY" ;;
+  401) echo "✗ بوابة التحديثات: الترخيص غير معروف ($CONF/license)." >&2 ;;
+  403) echo "✗ بوابة التحديثات: تحديثات هذه المؤسسة موقوفة — تواصل مع مطوّر المنصة. المنصة تبقى تعمل." >&2 ;;
+  429) echo "✗ بوابة التحديثات: طلبات كثيرة — أعد المحاولة بعد دقيقة." >&2 ;;
+  *)   echo "✗ بوابة التحديثات غير متاحة الآن ($CODE). المنصة تبقى تعمل، والتحديث يُعاد لاحقًا." >&2 ;;
+esac
+exit 0
+CHARITY_HELPER
+  chmod 755 /usr/local/bin/git-credential-charity
+  REPO_URL="https://github.com/$REPO_PATH.git"
+  if ! GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c credential.helper=charity \
+       ls-remote --tags "$REPO_URL" >/dev/null; then
+    die "تعذّر الوصول بالترخيص — الرسالة أعلاه تقول السبب. تحقق من الرقم، أو راسل مطوّر المنصة."
+  fi
+  echo "  ✓ الترخيص مفعَّل"
+else
+REPO_URL="git@$HOST_ALIAS:$REPO_PATH.git"
 step "مفتاح الوصول"
 mkdir -p "$SSH_DIR"
 chmod 700 "$SSH_DIR"
@@ -196,13 +298,16 @@ else
   echo
   echo "  ✓ فُعِّل الوصول"
 fi
+fi  # بلا ترخيص
 
 # ---- 5) الاستنساخ ----
 step "المنصة"
 if [ -d "$INSTALL_DIR/.git" ]; then
   echo "  موجودة في $INSTALL_DIR"
 else
-  git clone --quiet "git@$HOST_ALIAS:$REPO_PATH.git" "$INSTALL_DIR"
+  GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c credential.helper=charity \
+    clone --quiet "$REPO_URL" "$INSTALL_DIR"
+  [ -z "$LICENSE" ] || git -C "$INSTALL_DIR" config credential.helper charity
   echo "  ✓ استُنسخت إلى $INSTALL_DIR"
 fi
 cd "$INSTALL_DIR"
